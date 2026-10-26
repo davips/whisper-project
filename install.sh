@@ -34,11 +34,21 @@ if nvidia-smi -L >/dev/null 2>&1; then
 EXTRA="[cuda]"
 MODEL="large-v3"
 fi
-pipx install --force "$D$EXTRA"
+PIPX_HOME_DIR="${PIPX_HOME:-$HOME/.local/pipx}"
+if [ -d "$PIPX_HOME_DIR/venvs/whisper-project" ]; then
+    pipx runpip whisper-project install "$D$EXTRA"
+else
+    pipx install "$D$EXTRA"
+fi
 
-echo "Downloading model $MODEL..."
 PY="$(dirname "$(realpath "$BIN/dictate")")/python"
-HF_HUB_DISABLE_XET=1 "$PY" -c "from faster_whisper import download_model; download_model(\"$MODEL\")"
+MODEL_CACHE="$HOME/.cache/huggingface/hub/models--Systran--faster-whisper-$MODEL"
+if [ -d "$MODEL_CACHE" ]; then
+    echo "Model $MODEL already cached. Skipping download."
+else
+    echo "Downloading model $MODEL..."
+    HF_HUB_DISABLE_XET=1 "$PY" -c "from faster_whisper import download_model; download_model(\"$MODEL\")"
+fi
 
 mkdir -p "$AUTO"
 rm -f "$AUTO/dictate-scrolllock.desktop"
@@ -52,4 +62,4 @@ EOF
 
 stop_running
 setsid -f "$BIN/dictate" > "$LOG" 2>&1
-echo "Installed. Toggle dictation with the hotkey in ~/.dictate.conf (default: F2)."
+echo "Installed. Hotkeys in ~/.dictate.conf (defaults: Alt+Super+Space start, Enter flush, Esc cancel sentence, Super end; F1-F12 switch language)."

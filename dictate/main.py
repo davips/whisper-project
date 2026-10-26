@@ -12,16 +12,28 @@ import numpy as np
 import tkinter as tk
 import ctranslate2
 from faster_whisper import WhisperModel
-from Xlib import XK, display
+from faster_whisper.tokenizer import _LANGUAGE_CODES
+from Xlib import X, XK, display
 
 SR = 16000
 PIDF = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "dictate.pid")
 CFG = os.path.expanduser("~/.dictate.conf")
-DEFAULT_HOTKEY = "F2"
+DEFAULT_HOTKEY = "Alt+Super+Space"
+DEFAULT_FLUSH_HOTKEY = "Enter"
+DEFAULT_CANCEL_HOTKEY = "Esc"
+DEFAULT_STOP_HOTKEY = "Super"
+DEFAULT_LANGUAGE = "en"
+DEFAULT_LANGUAGES = {"F1": "en", "F2": "pt", "F3": "de", "F4": "es", "F5": "pl", "F6": "it", "F7": "fr", "F8": "ja", "F9": "zh", "F10": "ru", "F11": "no", "F12": "id"}
+LANG_ALIASES = {"pt-br": "pt"}
 UI_TICK_MS = 50
 CUDA = ctranslate2.get_cuda_device_count() > 0
 LANG = MODEL = None
 ui = queue.Queue()
+
+MODIFIERS = {"super": X.Mod4Mask, "ctrl": X.ControlMask, "control": X.ControlMask, "alt": X.Mod1Mask, "shift": X.ShiftMask}
+MOD_BITS = X.Mod4Mask | X.ControlMask | X.Mod1Mask | X.ShiftMask
+LOCK_MASKS = (0, X.LockMask, X.Mod2Mask, X.LockMask | X.Mod2Mask)
+KEY_ALIASES = {"enter": "Return", "esc": "Escape", "space": "space", "backspace": "BackSpace", "super": "Super_L", "alt": "Alt_L", "ctrl": "Control_L", "control": "Control_L", "shift": "Shift_L"}
 
 
 def running():
@@ -34,42 +46,150 @@ def running():
         return False
 
 
-class HotkeyToggle:
-    def __init__(self, hotkey):
+def parse_hotkey(disp, hotkey):
+    parts = [p.strip() for p in hotkey.split("+") if p.strip()]
+    name = KEY_ALIASES.get(parts[-1].lower(), parts[-1]) if parts else ""
+    keysym = next((k for k in (XK.string_to_keysym(c) for c in (name, name.capitalize(), name.upper())) if k), 0) if name else 0
+    keycode = disp.keysym_to_keycode(keysym) if keysym else 0
+    mask = 0
+    for mod in parts[:-1]:
+        if mod.lower() not in MODIFIERS:
+            keycode = 0
+            break
+        mask |= MODIFIERS[mod.lower()]
+    if not keycode:
+        raise ValueError(f"Invalid hotkey '{hotkey}' in {CFG}")
+    return keycode, mask
+
+
+def norm_lang(value):
+    v = value.strip().lower()
+    if v in ("", "auto"):
+        return None
+    v = LANG_ALIASES.get(v, v)
+    if v not in _LANGUAGE_CODES:
+        raise ValueError(f"Unknown language '{value}' in {CFG}")
+    return v
+
+
+class HotkeyGrabber(threading.Thread):
+    def __init__(self, bindings):
+        super().__init__(daemon=True)
+        self.events = queue.Queue()
         self.disp = display.Display()
-        keysym = XK.string_to_keysym(hotkey)
-        if keysym == 0:
-            raise ValueError(f"Invalid hotkey '{hotkey}' in {CFG}")
-        self.keycode = self.disp.keysym_to_keycode(keysym)
+        self.root = self.disp.screen().root
+        self.actions = {}
+        self.names = {}
+        for action, hotkey in bindings:
+            key = parse_hotkey(self.disp, hotkey)
+            if key in self.actions:
+                raise ValueError(f"'{hotkey}' is assigned to more than one action in {CFG}")
+            self.actions[key] = action
+            self.names[key] = hotkey
+        self.active = False
+        self.held = set()
+        self.grabbed = set()
+        for key, action in self.actions.items():
+            if action == "toggle" and not self.grab(key):
+                raise ValueError(f"Cannot grab '{self.names[key]}': it is already used by another application. Change it in {CFG}")
+        self.root.change_attributes(event_mask=X.KeyPressMask | X.KeyReleaseMask)
 
-    def pressed(self):
-        keys = self.disp.query_keymap()
-        return bool(keys[self.keycode // 8] & (1 << (self.keycode % 8)))
+    def grab(self, key):
+        keycode, mask = key
+        for lock in LOCK_MASKS:
+            errors = []
+            self.root.grab_key(keycode, mask | lock, False, X.GrabModeAsync, X.GrabModeAsync, onerror=lambda err, req, errors=errors: errors.append(err))
+            self.disp.sync()
+            if errors:
+                self.ungrab(key)
+                return False
+        self.grabbed.add(key)
+        return True
 
-    def close(self):
-        self.disp.close()
+    def ungrab(self, key):
+        keycode, mask = key
+        for lock in LOCK_MASKS:
+            self.root.ungrab_key(keycode, mask | lock)
+        self.disp.sync()
+        self.held.discard(keycode)
+        self.grabbed.discard(key)
+
+    def set_active(self, active):
+        if active == self.active:
+            return
+        self.active = active
+        for key, action in self.actions.items():
+            if action == "toggle":
+                continue
+            if not active:
+                self.ungrab(key)
+            elif not self.grab(key):
+                print(f"Cannot grab '{self.names[key]}': it is already used by another application", file=sys.stderr, flush=True)
+
+    def down(self, keycode):
+        return bool(self.disp.query_keymap()[keycode // 8] & (1 << (keycode % 8)))
+
+    def run(self):
+        while True:
+            e = self.disp.next_event()
+            if e.type == X.KeyRelease:
+                time.sleep(0.03)
+                if not self.down(e.detail):
+                    self.held.discard(e.detail)
+            elif e.type == X.KeyPress and e.detail not in self.held:
+                self.held.add(e.detail)
+                action = self.actions.get((e.detail, e.state & MOD_BITS))
+                if action:
+                    self.events.put(action)
 
 
-def load_hotkey():
+def load_config():
     cfg = configparser.ConfigParser()
-    if os.path.exists(CFG):
+    cfg.optionxform = str
+    try:
         cfg.read(CFG)
-    else:
-        cfg["dictate"] = {"hotkey": DEFAULT_HOTKEY}
+    except configparser.Error as e:
+        raise ValueError(f"Cannot read {CFG}: {e}")
+    before = {name: dict(cfg[name]) for name in cfg.sections()}
+    if "dictate" not in cfg:
+        cfg["dictate"] = {}
+    sec = cfg["dictate"]
+    if (sec.get("hotkey"), sec.get("flush_hotkey")) in (("F2", "F3"), ("Super+F5", "Super+F6"), ("F5", "F6")):
+        for k in ("hotkey", "flush_hotkey", "cancel_hotkey"):
+            sec.pop(k, None)
+    if sec.get("cancel_hotkey") == "Esc" and "stop_hotkey" not in sec:
+        sec["cancel_hotkey"] = DEFAULT_CANCEL_HOTKEY
+    if (sec.get("cancel_hotkey"), sec.get("stop_hotkey")) == ("Backspace", "Esc"):
+        sec["cancel_hotkey"], sec["stop_hotkey"] = DEFAULT_CANCEL_HOTKEY, DEFAULT_STOP_HOTKEY
+    sec.setdefault("hotkey", DEFAULT_HOTKEY)
+    sec.setdefault("flush_hotkey", DEFAULT_FLUSH_HOTKEY)
+    sec.setdefault("cancel_hotkey", DEFAULT_CANCEL_HOTKEY)
+    sec.setdefault("stop_hotkey", DEFAULT_STOP_HOTKEY)
+    sec.setdefault("language", DEFAULT_LANGUAGE)
+    if "languages" not in cfg:
+        cfg["languages"] = DEFAULT_LANGUAGES
+    if {name: dict(cfg[name]) for name in cfg.sections()} != before:
         with open(CFG, "w") as f:
             cfg.write(f)
-    hotkey = cfg.get("dictate", "hotkey", fallback=DEFAULT_HOTKEY).strip()
-    if XK.string_to_keysym(hotkey) == 0:
-        raise ValueError(f"Invalid hotkey '{hotkey}' in {CFG}")
-    return hotkey
+    bindings = [("toggle", sec["hotkey"].strip()), ("flush", sec["flush_hotkey"].strip()), ("cancel", sec["cancel_hotkey"].strip()), ("stop", sec["stop_hotkey"].strip())]
+    for hotkey, value in cfg["languages"].items():
+        bindings.append((f"lang:{norm_lang(value) or 'auto'}", hotkey.strip()))
+    return bindings, norm_lang(sec["language"])
 
 
 class Session(threading.Thread):
-    def __init__(self):
+    def __init__(self, lang):
         super().__init__(daemon=True)
+        self.initial_lang = lang
+        self.new_lang = None
+        self.lang_changed = threading.Event()
         self.stop = threading.Event()
+        self.flush = threading.Event()
+        self.cancel = threading.Event()
         self.buf = bytearray()
         self.lock = threading.Lock()
+        self.latest_text = ""
+        self.latest_lock = threading.Lock()
         self.rec = subprocess.Popen(["arecord", "-q", "-f", "S16_LE", "-r", str(SR), "-c", "1", "-t", "raw"], stdout=subprocess.PIPE)
         self.reader = threading.Thread(target=self.read, daemon=True)
         self.reader.start()
@@ -84,6 +204,38 @@ class Session(threading.Thread):
             data = bytes(self.buf[start * 2:])
         return np.frombuffer(data, np.int16).astype(np.float32) / 32768
 
+    def request_flush(self):
+        self.flush.set()
+
+    def request_cancel(self):
+        self.cancel.set()
+
+    def request_language(self, lang):
+        self.new_lang = lang
+        self.lang_changed.set()
+
+    def set_latest(self, text):
+        with self.latest_lock:
+            self.latest_text = text
+
+    def get_latest(self):
+        with self.latest_lock:
+            return self.latest_text
+
+    def type_text(self, text):
+        subprocess.run(["xdotool", "type", "--clearmodifiers", "--file", "-"], input=text.replace("\n", " ").encode())
+
+    def flush_now(self):
+        text = self.get_latest().strip()
+        if text:
+            self.type_text(text)
+        with self.lock:
+            return len(self.buf) // 2
+
+    def cancel_now(self):
+        with self.lock:
+            return len(self.buf) // 2
+
     def run(self):
         try:
             self.work()
@@ -93,21 +245,37 @@ class Session(threading.Thread):
 
     def work(self):
         model = WhisperModel(MODEL, device="cuda" if CUDA else "cpu", compute_type="int8_float16" if CUDA else "int8")
-        lang, start, done = LANG, 0, ""
+        chosen = lang = self.initial_lang
+        start, done = 0, ""
         while not self.stop.is_set():
+            if self.lang_changed.is_set():
+                self.lang_changed.clear()
+                chosen = lang = self.new_lang
+            if self.cancel.is_set():
+                self.cancel.clear()
+                start = self.cancel_now()
+                done, lang = "", chosen
+                self.set_latest("")
+            if self.flush.is_set():
+                self.flush.clear()
+                start = self.flush_now()
+                done, lang = "", chosen
+                self.set_latest("")
             a = self.audio(start)
             if len(a) < SR // 2:
                 time.sleep(0.1)
                 continue
             segs, info = model.transcribe(a, language=lang, beam_size=1, vad_filter=True, initial_prompt=done[-200:] or None)
             segs = list(segs)
-            if lang is None and len(a) > 4 * SR:
+            if lang is None and len(a) > 4 * SR and info.language_probability >= 0.85:
                 lang = info.language
             if len(a) > 20 * SR and len(segs) > 1:
                 done += "".join(s.text for s in segs[:-1])
                 start += int(segs[-2].end * SR)
                 segs = segs[-1:]
-            ui.put(done + "".join(s.text for s in segs))
+            preview = done + "".join(s.text for s in segs)
+            self.set_latest(preview)
+            ui.put(preview)
         self.rec.terminate()
         self.reader.join()
         a = self.audio(start)
@@ -116,24 +284,31 @@ class Session(threading.Thread):
         del model
         gc.collect()
         if text:
-            subprocess.run(["xdotool", "type", "--clearmodifiers", "--file", "-"], input=text.encode())
+            self.type_text(text)
 
 
 def main():
     global LANG, MODEL
     p = argparse.ArgumentParser(prog="dictate")
-    p.add_argument("--language", help="e.g. pt, en (default: auto-detect)")
+    p.add_argument("--language", help="e.g. pt, en, auto (default: language in ~/.dictate.conf)")
     p.add_argument("--model", help="default: large-v3 with CUDA, small on CPU")
     a = p.parse_args()
-    LANG, MODEL = a.language, a.model or ("large-v3" if CUDA else "small")
+    MODEL = a.model or ("large-v3" if CUDA else "small")
     try:
-        hotkey = load_hotkey()
+        bindings, LANG = load_config()
+        if a.language:
+            LANG = norm_lang(a.language)
     except ValueError as e:
         sys.exit(str(e))
     if running():
         sys.exit(0)
+    try:
+        grabber = HotkeyGrabber(bindings)
+    except ValueError as e:
+        sys.exit(str(e))
     with open(PIDF, "w") as f:
         f.write(str(os.getpid()))
+    grabber.start()
 
     root = tk.Tk()
     root.overrideredirect(True)
@@ -141,8 +316,7 @@ def main():
     label = tk.Label(root, bg="black", fg="white", font=("Sans", 20), wraplength=1100, justify="left", padx=16, pady=10)
     label.pack()
     root.withdraw()
-    toggle = HotkeyToggle(hotkey)
-    state = {"session": None, "on": False, "prev_pressed": False}
+    state = {"session": None, "on": False, "lang": LANG}
 
     def show(text):
         label.config(text=text)
@@ -153,16 +327,30 @@ def main():
         root.deiconify()
 
     def tick():
-        pressed = toggle.pressed()
-        if pressed and not state["prev_pressed"]:
-            state["on"] = not state["on"]
-        state["prev_pressed"] = pressed
+        while not grabber.events.empty():
+            action = grabber.events.get()
+            s = state["session"]
+            if action == "toggle":
+                state["on"] = not state["on"]
+            elif action == "stop":
+                state["on"] = False
+            elif state["on"] and s is not None:
+                if action == "flush":
+                    s.request_flush()
+                elif action == "cancel":
+                    s.request_cancel()
+                else:
+                    state["lang"] = None if action == "lang:auto" else action[5:]
+                    s.request_language(state["lang"])
+                show(f"● [{state['lang'] or 'auto'}] listening")
         on = state["on"]
+        grabber.set_active(on)
         s = state["session"]
         if on and s is None:
-            state["session"] = Session()
+            state["lang"] = LANG
+            state["session"] = Session(LANG)
             state["session"].start()
-            show("● listening")
+            show(f"● [{LANG or 'auto'}] listening")
         elif not on and s is not None:
             s.stop.set()
         while not ui.empty():
@@ -171,14 +359,11 @@ def main():
                 root.withdraw()
                 state["session"] = None
             else:
-                show("● " + msg.strip())
+                show(f"● [{state['lang'] or 'auto'}] " + msg.strip())
         root.after(UI_TICK_MS, tick)
 
     root.after(UI_TICK_MS, tick)
-    try:
-        root.mainloop()
-    finally:
-        toggle.close()
+    root.mainloop()
 
 
 if __name__ == "__main__":
