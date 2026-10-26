@@ -1,10 +1,10 @@
 # whisper-project
 
-Local dictation for Linux desktops using Whisper large-v3 through faster-whisper, which runs on CTranslate2 (an inference engine for transformer models). Turning Scroll Lock on starts listening and shows a live transcription preview at the bottom of the screen. Turning it off pastes the final text into the focused window, such as an email client, a browser or a chat box.
+Local dictation for Linux desktops using Whisper large-v3 through faster-whisper, which runs on CTranslate2 (an inference engine for transformer models). Pressing your configured hotkey (default: F2) starts listening and shows a live transcription preview at the bottom of the screen. Pressing it again pastes the final text into the focused window, such as an email client, a browser or a chat box.
 
 ## Features
 
-- Toggle with Scroll Lock: the lock state is the listening state.
+- Toggle with a global hotkey from `~/.dictate.conf` (default: F2).
 - Live provisional transcription in an always-on-top overlay that does not take keyboard focus.
 - Final text pasted through the clipboard, which handles accented characters reliably.
 - Automatic language detection, fixed for the session after 4 s of audio.
@@ -18,7 +18,7 @@ Local dictation for Linux desktops using Whisper large-v3 through faster-whisper
 - Linux with an X11 session. Wayland is not supported.
 - System Python 3.10 to 3.13.
 - A microphone available through ALSA (Advanced Linux Sound Architecture), including PipeWire and PulseAudio setups.
-- apt, dnf or pacman for automatic installation of system tools. Otherwise, install pipx, Python Tk, arecord, xclip, xdotool, xset and xmodmap manually.
+- apt, dnf or pacman for automatic installation of system tools. Otherwise, install pipx, Python Tk, arecord, xclip and xdotool manually.
 - Optional: an NVIDIA GPU with driver 525 or later, for CUDA (NVIDIA compute platform) 12 support, and about 3 GB of free VRAM for large-v3.
 
 ## Installation
@@ -34,8 +34,7 @@ The script:
 1. Installs the system tools.
 2. Installs the package with pipx, adding the `cuda` extra when `nvidia-smi` detects a GPU.
 3. Downloads the model.
-4. Makes Scroll Lock a lock key if it is not one already.
-5. Creates the login autostart entry and starts the program.
+4. Creates the login autostart entry and starts the program.
 
 To update: run `git pull`, then `./install.sh`.
 
@@ -44,8 +43,8 @@ To uninstall: run `./install.sh --uninstall`. The downloaded model stays in `~/.
 ## Usage
 
 1. Place the cursor where the text should go.
-2. Press Scroll Lock. The overlay shows "● listening", then the provisional text.
-3. Press Scroll Lock again. The final text is pasted.
+2. Press your configured hotkey. The overlay shows "● listening", then the provisional text.
+3. Press the same hotkey again. The final text is pasted.
 
 Command-line options:
 
@@ -58,12 +57,19 @@ dictate [--language LANG] [--model MODEL]
 
 To make options permanent, edit the `Exec=` line in `~/.config/autostart/dictate.desktop`.
 
+To choose the hotkey, edit `~/.dictate.conf`:
+
+`````
+[dictate]
+hotkey = F2
+`````
+
 ## How it works
 
-- `arecord` starts capturing 16 kHz mono audio as soon as Scroll Lock turns on, while the model loads.
+- `arecord` starts capturing 16 kHz mono audio as soon as the hotkey starts dictation, while the model loads.
 - For the preview, the audio recorded so far is re-transcribed in a loop with greedy decoding (beam size 1).
 - After 20 s of audio, all segments except the latest are committed. Committed text is passed as `initial_prompt` for context, which keeps each pass short.
-- When Scroll Lock turns off, the remaining audio is transcribed with beam search (beam size 5) and VAD (voice activity detection) filtering.
+- When the hotkey stops dictation, the remaining audio is transcribed with beam search (beam size 5) and VAD (voice activity detection) filtering.
 - The text is copied with `xclip` and pasted with `xdotool` (Ctrl+V).
 - The program re-launches itself once with `LD_LIBRARY_PATH` pointing to the cuBLAS and cuDNN libraries installed from pip wheels, so no system CUDA toolkit is needed.
 
@@ -71,7 +77,7 @@ To make options permanent, edit the `Exec=` line in `~/.config/autostart/dictate
 
 - Dictation replaces the clipboard content.
 - Terminals paste with Ctrl+Shift+V, so the automatic paste does not work there. The text remains in the clipboard.
-- Only an off-to-on transition starts listening. If Scroll Lock is on at startup, the first press only turns it off.
+- The configured hotkey toggles dictation on and off globally.
 - After the first dictation, the process keeps a CUDA context of about 80 MiB of VRAM.
 - PyAV is pinned below version 19, because PyAV 19 removed an argument used by faster-whisper 1.2.1 (SYSTRAN/faster-whisper#1492).
 - If a model download hangs, set `HF_HUB_DISABLE_XET=1` to bypass the Xet transfer backend.

@@ -19,13 +19,13 @@ exit 0
 fi
 
 if command -v apt-get >/dev/null; then
-sudo apt-get install -y pipx python3-tk alsa-utils xclip xdotool x11-xserver-utils
+sudo apt-get install -y pipx python3-tk alsa-utils xclip xdotool
 elif command -v dnf >/dev/null; then
-sudo dnf install -y pipx python3-tkinter alsa-utils xclip xdotool xset xmodmap
+sudo dnf install -y pipx python3-tkinter alsa-utils xclip xdotool
 elif command -v pacman >/dev/null; then
-sudo pacman -S --needed --noconfirm python-pipx tk alsa-utils xclip xdotool xorg-xset xorg-xmodmap
+sudo pacman -S --needed --noconfirm python-pipx tk alsa-utils xclip xdotool
 else
-echo "Unknown package manager: install pipx, Python Tk, arecord, xclip, xdotool, xset and xmodmap manually."
+echo "Unknown package manager: install pipx, Python Tk, arecord, xclip and xdotool manually."
 fi
 
 EXTRA=""
@@ -41,15 +41,7 @@ PY="$(dirname "$(realpath "$BIN/dictate")")/python"
 HF_HUB_DISABLE_XET=1 "$PY" -c "from faster_whisper import download_model; download_model(\"$MODEL\")"
 
 mkdir -p "$AUTO"
-if ! xmodmap -pm | grep -q Scroll_Lock; then
-xmodmap -e "add mod3 = Scroll_Lock"
-cat > "$AUTO/dictate-scrolllock.desktop" << EOF
-[Desktop Entry]
-Type=Application
-Name=Scroll Lock as lock key
-Exec=xmodmap -e "add mod3 = Scroll_Lock"
-EOF
-fi
+rm -f "$AUTO/dictate-scrolllock.desktop"
 
 cat > "$AUTO/dictate.desktop" << EOF
 [Desktop Entry]
@@ -60,4 +52,4 @@ EOF
 
 stop_running
 setsid -f "$BIN/dictate" > "$LOG" 2>&1
-echo "Installed. Toggle dictation with Scroll Lock."
+echo "Installed. Toggle dictation with the hotkey in ~/.dictate.conf (default: F2)."
