@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -e
+HF_HUB_DISABLE_XET=1
 D="$(dirname "$(realpath "$0")")"
 BIN="${PIPX_BIN_DIR:-$HOME/.local/bin}"
 AUTO="$HOME/.config/autostart"
