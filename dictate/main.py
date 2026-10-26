@@ -18,6 +18,7 @@ SR = 16000
 PIDF = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "dictate.pid")
 CFG = os.path.expanduser("~/.dictate.conf")
 DEFAULT_HOTKEY = "F2"
+UI_TICK_MS = 50
 CUDA = ctranslate2.get_cuda_device_count() > 0
 LANG = MODEL = None
 ui = queue.Queue()
@@ -95,8 +96,8 @@ class Session(threading.Thread):
         lang, start, done = LANG, 0, ""
         while not self.stop.is_set():
             a = self.audio(start)
-            if len(a) < SR:
-                time.sleep(0.2)
+            if len(a) < SR // 2:
+                time.sleep(0.1)
                 continue
             segs, info = model.transcribe(a, language=lang, beam_size=1, vad_filter=True, initial_prompt=done[-200:] or None)
             segs = list(segs)
@@ -171,9 +172,9 @@ def main():
                 state["session"] = None
             else:
                 show("● " + msg.strip())
-        root.after(150, tick)
+        root.after(UI_TICK_MS, tick)
 
-    root.after(150, tick)
+    root.after(UI_TICK_MS, tick)
     try:
         root.mainloop()
     finally:
