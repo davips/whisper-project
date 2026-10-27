@@ -7,7 +7,7 @@ if libs and not set(libs) <= set(cur.split(":")):
     os.environ["LD_LIBRARY_PATH"] = ":".join(libs + cur.split(":") if cur else libs)
     os.execv(sys.executable, [sys.executable, "-m", "dictate.main"] + sys.argv[1:])
 
-import argparse, configparser, gc, queue, subprocess, threading, time
+import argparse, configparser, gc, queue, select, subprocess, threading, time
 import numpy as np
 import tkinter as tk
 import ctranslate2
@@ -23,11 +23,19 @@ DEFAULT_FLUSH_HOTKEY = "Enter"
 DEFAULT_CANCEL_HOTKEY = "Esc"
 DEFAULT_STOP_HOTKEY = "Super"
 DEFAULT_LANGUAGE = "en"
+DEFAULT_WINDOW = 30
+MIN_WINDOW, MAX_WINDOW = 10, 300
+WINDOW_COMMENTS = (
+    "# window: seconds of recent audio re-transcribed on every preview update, before older text is committed",
+    f"# valid range is {MIN_WINDOW} to {MAX_WINDOW}, default {DEFAULT_WINDOW}",
+    "# larger values give more context and better accuracy, but the preview updates slower",
+    "# smaller values make the preview faster, but sentences are cut with less context",
+)
 DEFAULT_LANGUAGES = {"F1": "en", "F2": "pt", "F3": "de", "F4": "es", "F5": "pl", "F6": "it", "F7": "fr", "F8": "ja", "F9": "zh", "F10": "ru", "F11": "no", "F12": "id"}
 LANG_ALIASES = {"pt-br": "pt"}
 UI_TICK_MS = 50
 CUDA = ctranslate2.get_cuda_device_count() > 0
-LANG = MODEL = None
+LANG = MODEL = WINDOW = None
 ui = queue.Queue()
 
 MODIFIERS = {"super": X.Mod4Mask, "ctrl": X.ControlMask, "control": X.ControlMask, "alt": X.Mod1Mask, "shift": X.ShiftMask}
@@ -87,6 +95,8 @@ class HotkeyGrabber(threading.Thread):
             self.actions[key] = action
             self.names[key] = hotkey
         self.active = False
+        self.requested = False
+        self.commands = queue.Queue()
         self.held = set()
         self.grabbed = set()
         for key, action in self.actions.items():
@@ -115,6 +125,11 @@ class HotkeyGrabber(threading.Thread):
         self.grabbed.discard(key)
 
     def set_active(self, active):
+        if active != self.requested:
+            self.requested = active
+            self.commands.put(active)
+
+    def apply_active(self, active):
         if active == self.active:
             return
         self.active = active
@@ -126,25 +141,34 @@ class HotkeyGrabber(threading.Thread):
             elif not self.grab(key):
                 print(f"Cannot grab '{self.names[key]}': it is already used by another application", file=sys.stderr, flush=True)
 
-    def down(self, keycode):
-        return bool(self.disp.query_keymap()[keycode // 8] & (1 << (keycode % 8)))
-
     def run(self):
+        e = None
         while True:
-            e = self.disp.next_event()
-            if e.type == X.KeyRelease:
+            while not self.commands.empty():
+                self.apply_active(self.commands.get())
+            if e is None:
+                if not self.disp.pending_events():
+                    select.select([self.disp], [], [], UI_TICK_MS / 1000)
+                    continue
+                e = self.disp.next_event()
+            cur, e = e, None
+            if cur.type == X.KeyRelease:
                 time.sleep(0.03)
-                if not self.down(e.detail):
-                    self.held.discard(e.detail)
-            elif e.type == X.KeyPress and e.detail not in self.held:
-                self.held.add(e.detail)
-                action = self.actions.get((e.detail, e.state & MOD_BITS))
+                if self.disp.pending_events():
+                    e = self.disp.next_event()
+                    if e.type == X.KeyPress and e.detail == cur.detail and e.time == cur.time:
+                        e = None
+                        continue
+                self.held.discard(cur.detail)
+            elif cur.type == X.KeyPress and cur.detail not in self.held:
+                self.held.add(cur.detail)
+                action = self.actions.get((cur.detail, cur.state & MOD_BITS))
                 if action:
                     self.events.put(action)
 
 
 def load_config():
-    cfg = configparser.ConfigParser()
+    cfg = configparser.ConfigParser(delimiters=("=",), comment_prefixes=(), allow_no_value=True)
     cfg.optionxform = str
     try:
         cfg.read(CFG)
@@ -166,6 +190,10 @@ def load_config():
     sec.setdefault("cancel_hotkey", DEFAULT_CANCEL_HOTKEY)
     sec.setdefault("stop_hotkey", DEFAULT_STOP_HOTKEY)
     sec.setdefault("language", DEFAULT_LANGUAGE)
+    if "window" not in sec:
+        for line in WINDOW_COMMENTS:
+            sec[line] = None
+        sec["window"] = str(DEFAULT_WINDOW)
     if "languages" not in cfg:
         cfg["languages"] = DEFAULT_LANGUAGES
     if {name: dict(cfg[name]) for name in cfg.sections()} != before:
@@ -173,14 +201,23 @@ def load_config():
             cfg.write(f)
     bindings = [("toggle", sec["hotkey"].strip()), ("flush", sec["flush_hotkey"].strip()), ("cancel", sec["cancel_hotkey"].strip()), ("stop", sec["stop_hotkey"].strip())]
     for hotkey, value in cfg["languages"].items():
+        if hotkey.startswith("#"):
+            continue
         bindings.append((f"lang:{norm_lang(value) or 'auto'}", hotkey.strip()))
-    return bindings, norm_lang(sec["language"])
+    try:
+        window = float(sec["window"])
+    except ValueError:
+        window = 0
+    if not MIN_WINDOW <= window <= MAX_WINDOW:
+        raise ValueError(f"Invalid window '{sec['window']}' in {CFG}: use a number of seconds from {MIN_WINDOW} to {MAX_WINDOW}")
+    return bindings, norm_lang(sec["language"]), window
 
 
 class Session(threading.Thread):
-    def __init__(self, lang):
+    def __init__(self, lang, window):
         super().__init__(daemon=True)
         self.initial_lang = lang
+        self.window = window
         self.new_lang = None
         self.lang_changed = threading.Event()
         self.stop = threading.Event()
@@ -269,7 +306,7 @@ class Session(threading.Thread):
             segs = list(segs)
             if lang is None and len(a) > 4 * SR and info.language_probability >= 0.85:
                 lang = info.language
-            if len(a) > 20 * SR and len(segs) > 1:
+            if len(a) > self.window * SR and len(segs) > 1:
                 done += "".join(s.text for s in segs[:-1])
                 start += int(segs[-2].end * SR)
                 segs = segs[-1:]
@@ -288,14 +325,14 @@ class Session(threading.Thread):
 
 
 def main():
-    global LANG, MODEL
+    global LANG, MODEL, WINDOW
     p = argparse.ArgumentParser(prog="dictate")
     p.add_argument("--language", help="e.g. pt, en, auto (default: language in ~/.dictate.conf)")
     p.add_argument("--model", help="default: large-v3 with CUDA, small on CPU")
     a = p.parse_args()
     MODEL = a.model or ("large-v3" if CUDA else "small")
     try:
-        bindings, LANG = load_config()
+        bindings, LANG, WINDOW = load_config()
         if a.language:
             LANG = norm_lang(a.language)
     except ValueError as e:
@@ -348,7 +385,7 @@ def main():
         s = state["session"]
         if on and s is None:
             state["lang"] = LANG
-            state["session"] = Session(LANG)
+            state["session"] = Session(LANG, WINDOW)
             state["session"].start()
             show(f"● [{LANG or 'auto'}] listening")
         elif not on and s is not None:
