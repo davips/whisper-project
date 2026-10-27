@@ -37,7 +37,7 @@ The script:
 1. Installs the system tools.
 2. Installs the package with pipx, adding the `cuda` extra when `nvidia-smi` detects a GPU.
 3. Downloads the model.
-4. Creates the login autostart entry and starts the program.
+4. Installs, enables and starts the systemd user service.
 
 To update: run `git pull`, then `./install.sh`.
 
@@ -61,7 +61,7 @@ dictate [--language LANG] [--model MODEL]
 - `--language`: a language code such as `pt` or `en`, or `auto` for detection. The default is `language` in `~/.dictate.conf` (`en`).
 - `--model`: a faster-whisper model name such as `medium` or `large-v3`. The default is `large-v3` with CUDA and `small` on CPU.
 
-To make options permanent, edit the `Exec=` line in `~/.config/autostart/dictate.desktop`.
+To make options permanent, edit the `ExecStart=` line in `~/.config/systemd/user/dictate.service` (or run `systemctl --user edit dictate`).
 
 To choose the hotkeys and languages, edit `~/.dictate.conf`:
 
@@ -110,7 +110,7 @@ F12 = id
 - After the first dictation, the process keeps a CUDA context of about 80 MiB of VRAM.
 - PyAV is pinned below version 19, because PyAV 19 removed an argument used by faster-whisper 1.2.1 (SYSTRAN/faster-whisper#1492).
 - If a model download hangs, set `HF_HUB_DISABLE_XET=1` to bypass the Xet transfer backend.
-- Logs go to `$XDG_RUNTIME_DIR/dictate.log` when the program is started by `install.sh`, and to `~/.xsession-errors` when it is started at login.
+- Logs can be viewed with `journalctl --user -u dictate -f`.
 
 ## Development
 

@@ -1,0 +1,12 @@
+[Unit]
+Description=Dictation (whisper-project)
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/dictate
+Restart=on-failure
+RestartSec=2
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target
