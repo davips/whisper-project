@@ -63,7 +63,7 @@ dictate [--language LANG] [--model MODEL]
 
 To make options permanent, edit the `ExecStart=` line in `~/.config/systemd/user/dictate.service` (or run `systemctl --user edit dictate`).
 
-To choose the hotkeys and languages, edit `~/.dictate.conf`:
+To choose the hotkeys, languages and recognition window, edit `~/.dictate.conf`. The program creates the file on first start, with the defaults below and the comments on `window`; existing values and comments are kept:
 
 `````
 [dictate]
@@ -72,6 +72,11 @@ flush_hotkey = Enter
 cancel_hotkey = Esc
 stop_hotkey = Super
 language = en
+# window: seconds of recent audio re-transcribed on every preview update, before older text is committed
+# valid range is 10 to 300, default 30
+# larger values give more context and better accuracy, but the preview updates slower
+# smaller values make the preview faster, but sentences are cut with less context
+window = 30
 
 [languages]
 F1 = en
@@ -95,7 +100,7 @@ F12 = id
 - The flush hotkey types the text recognized up to that moment and continues listening from new audio.
 - A language key sets the language for the rest of the session, including after a flush or cancel. The next session starts again with `language`.
 - The cancel hotkey discards recognized text up to that moment and continues listening from new audio.
-- After 20 s of audio, all segments except the latest are committed. Committed text is passed as `initial_prompt` for context, which keeps each pass short.
+- After `window` seconds of audio (default 30 s, range 10 to 300), all segments except the latest are committed. Committed text is passed as `initial_prompt` for context, which keeps each pass short.
 - When the hotkey stops dictation, the remaining audio is transcribed with beam search (beam size 5) and VAD (voice activity detection) filtering.
 - The text is typed with `xdotool` into the focused window.
 - The program re-launches itself once with `LD_LIBRARY_PATH` pointing to the cuBLAS and cuDNN libraries installed from pip wheels, so no system CUDA toolkit is needed.
@@ -103,10 +108,11 @@ F12 = id
 ## Notes
 
 - The focused window must accept keyboard input.
-- The toggle hotkey is grabbed globally. The flush, cancel and stop hotkeys are grabbed only while dictation is on, so Enter, Esc and Super work normally otherwise. Grabbed keys are not delivered to the focused application. Modifiers (`Ctrl`, `Alt`, `Shift`, `Super`) can be combined with `+`, for example `Ctrl+Alt+F5`. `Enter`, `Esc`, `Backspace` and bare `Super`, `Alt`, `Ctrl`, `Shift` (left key) are accepted as key names.
-- If a key is already taken by another application, the program exits with an error in the log; choose another key in `~/.dictate.conf`.
+- The toggle hotkey is grabbed globally. The flush, cancel and stop hotkeys are grabbed only while dictation is on, so Enter, Esc and Super work normally otherwise. Grabbed keys are not delivered to the focused application. Modifiers (`Ctrl`, `Alt`, `Shift`, `Super`) can be combined with `+`, for example `Ctrl+Alt+F5`. The key name can be `Enter`, `Esc`, `Backspace`, `Space`, bare `Super`, `Alt`, `Ctrl`, `Shift` (left key) or any X keysym name such as `F5` or `KP_Enter`.
+- If the toggle hotkey is already taken by another application (for example by the window manager), the program exits with an error in the log; choose another key in `~/.dictate.conf`. The same conflict on the flush, cancel, stop or language keys is only logged and that key does nothing, so a stop hotkey that seems dead is usually taken by the window manager.
+- `window` must be a number from 10 to 300, otherwise the program exits with an error naming the value.
 - Every key must be assigned to a single action. Each line in `[languages]` is `key = language`, where the key can have modifiers (`Ctrl+F1`) and the language is a Whisper code, `auto`, or `pt-br` (same as `pt`).
-- The language keys are grabbed only while dictation is on. If another application already owns one of them (for example F12 for a drop-down terminal), it is skipped and the log names it. Remap it in `[languages]`.
+- If another application already owns a language key (for example F12 for a drop-down terminal), it is skipped and the log names it. Remap it in `[languages]`.
 - After the first dictation, the process keeps a CUDA context of about 80 MiB of VRAM.
 - PyAV is pinned below version 19, because PyAV 19 removed an argument used by faster-whisper 1.2.1 (SYSTRAN/faster-whisper#1492).
 - If a model download hangs, set `HF_HUB_DISABLE_XET=1` to bypass the Xet transfer backend.
@@ -117,4 +123,4 @@ F12 = id
 `````bash
 poetry install --extras cuda
 poetry run dictate
-````
+`````
